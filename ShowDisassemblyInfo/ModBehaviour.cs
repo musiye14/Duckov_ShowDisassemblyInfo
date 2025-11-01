@@ -8,7 +8,8 @@ using TMPro;
 using UnityEngine;
 using System.Text;
 using System.Linq;
-using Duckov.Economy; 
+using Duckov.Economy;
+using UnityEngine.UI;
 
 namespace ShowDisassemblyInfo
 {
@@ -19,6 +20,17 @@ namespace ShowDisassemblyInfo
 
         private Dictionary<int, List<int>> _sourceLookupCache = null;
         private const string LogPrefix = "[ShowDisassemblyInfo] ";
+        private const string MOD_NAME = "ShowDisassemblyInfo";
+
+        // 配置类
+        [System.Serializable]
+        public class ModConfig
+        {
+            public bool showOutputs = true;  // 显示"拆解出"
+            public bool showSources = true;  // 显示"可由以下物品分解出"
+        }
+
+        private ModConfig config = new ModConfig();
 
         private void Awake()
         {
@@ -37,6 +49,13 @@ namespace ShowDisassemblyInfo
             Debug.Log(LogPrefix + "OnEnable called. Subscribing to events...");
             ItemHoveringUI.onSetupItem += OnSetupItemHoveringUI;
             ItemHoveringUI.onSetupMeta += OnSetupMetaHoveringUI;
+
+            // 初始化 ModConfigAPI
+            if (ModConfigAPI.IsAvailable())
+            {
+                SetupModConfig();
+                LoadConfigFromModConfig();
+            }
         }
 
         void OnDisable()
@@ -44,7 +63,6 @@ namespace ShowDisassemblyInfo
             Debug.Log(LogPrefix + "OnDisable called. Unsubscribing from events...");
             ItemHoveringUI.onSetupItem -= OnSetupItemHoveringUI;
             ItemHoveringUI.onSetupMeta -= OnSetupMetaHoveringUI;
-            // 确保 Mod 禁用时 UI 也隐藏
             HideLabels();
         }
 
@@ -52,20 +70,26 @@ namespace ShowDisassemblyInfo
         {
             get
             {
-                // 如果实例还不存在...
                 if (_outputsTextInstance == null)
                 {
                     Debug.Log(LogPrefix + "Lazy initializing OutputsText...");
                     try
                     {
-                        // ...就在这里创建它
                         _outputsTextInstance = Instantiate(GameplayDataSettings.UIStyle.TemplateTextUGUI);
                         if (_outputsTextInstance != null)
                         {
                              _outputsTextInstance.fontSize = 18f;
                              _outputsTextInstance.color = Color.cyan;
-                             _outputsTextInstance.gameObject.SetActive(false); // 初始隐藏
-                             // 【重要】设置 DontDestroyOnLoad 防止场景切换时丢失 (可选但推荐)
+                             _outputsTextInstance.gameObject.SetActive(false);
+                             _outputsTextInstance.enableWordWrapping = true;
+                             
+                             
+                             ContentSizeFitter fitter = _outputsTextInstance.gameObject.AddComponent<ContentSizeFitter>();
+                             fitter.verticalFit = ContentSizeFitter.FitMode.PreferredSize; // 高度自动适应内容
+                             
+                             fitter.horizontalFit = ContentSizeFitter.FitMode.Unconstrained;
+                             
+                             
                              DontDestroyOnLoad(_outputsTextInstance.gameObject); 
                         }
                         else
@@ -88,14 +112,18 @@ namespace ShowDisassemblyInfo
                     Debug.Log(LogPrefix + "Lazy initializing SourcesText...");
                      try
                     {
-                        // ...就在这里创建它
                         _sourcesTextInstance = Instantiate(GameplayDataSettings.UIStyle.TemplateTextUGUI);
                          if (_sourcesTextInstance != null)
                         {
                             _sourcesTextInstance.fontSize = 18f;
                             _sourcesTextInstance.color = Color.yellow;
-                            _sourcesTextInstance.gameObject.SetActive(false); // 初始隐藏
-                            // 【重要】设置 DontDestroyOnLoad
+                            _sourcesTextInstance.gameObject.SetActive(false);
+                            _sourcesTextInstance.enableWordWrapping = true; 
+                            
+                            ContentSizeFitter fitter = _sourcesTextInstance.gameObject.AddComponent<ContentSizeFitter>();
+                            fitter.verticalFit = ContentSizeFitter.FitMode.PreferredSize; 
+                            fitter.horizontalFit = ContentSizeFitter.FitMode.Unconstrained;
+                            
                             DontDestroyOnLoad(_sourcesTextInstance.gameObject); 
                         }
                         else
@@ -133,123 +161,129 @@ namespace ShowDisassemblyInfo
         private void UpdateLabels(ItemHoveringUI uiInstance, int itemID)
         {
             // Debug.Log(LogPrefix + $"UpdateLabels called for itemID: {itemID}"); // 这条日志可以暂时注释掉
-            
-            var currentOutputsText = OutputsText; 
+
+            var currentOutputsText = OutputsText;
             var currentSourcesText = SourcesText;
-            
+
             if (DecomposeDatabase.Instance == null || uiInstance == null || uiInstance.LayoutParent == null || currentOutputsText == null || currentSourcesText == null)
             {
-                // Debug.LogError(LogPrefix + "UpdateLabels prerequisites failed!"); 
+                // Debug.LogError(LogPrefix + "UpdateLabels prerequisites failed!");
                 HideLabels();
                 return;
             }
-            
+
             bool outputFound = false;
             bool sourceFound = false;
 
             // --- 1. 获取可拆解 Outputs ---
-            try 
+            if (config.showOutputs) // 检查配置
             {
-                DecomposeFormula formula = DecomposeDatabase.Instance.GetFormula(itemID);
-                if (formula.valid)
+                try
                 {
-                    var outputs = GetOutputsFromCost(formula.result);
-                    if (outputs.Any())
+                    DecomposeFormula formula = DecomposeDatabase.Instance.GetFormula(itemID);
+                    if (formula.valid)
                     {
-                        StringBuilder sb = new StringBuilder(ModLocalization.GetTranslation(ModLocalization.OutputsPrefixKey));
-                        #region Build Output String (不变)
-                        bool metaDataValid = true;
-                        for (int i = 0; i < outputs.Count; i++)
+                        var outputs = GetOutputsFromCost(formula.result);
+                        if (outputs.Any())
                         {
-                            var output = outputs[i];
-                            ItemMetaData meta = ItemAssetsCollection.GetMetaData(output.itemId);
-                            if (string.IsNullOrEmpty(meta.Name)) { metaDataValid = false; break; }
-                            sb.Append($"{meta.DisplayName} x{output.count}");
-                            
-                            bool isLastItemInLine = (i + 1) % 10 == 0; 
-                            bool isLastItemOverall = i == outputs.Count - 1; 
-                            if (!isLastItemOverall) 
+                            StringBuilder sb = new StringBuilder(ModLocalization.GetTranslation(ModLocalization.OutputsPrefixKey));
+                            #region Build Output String (不变)
+                            bool metaDataValid = true;
+                            for (int i = 0; i < outputs.Count; i++)
                             {
-                                if (isLastItemInLine)
+                                var output = outputs[i];
+                                ItemMetaData meta = ItemAssetsCollection.GetMetaData(output.itemId);
+                                if (string.IsNullOrEmpty(meta.Name)) { metaDataValid = false; break; }
+                                sb.Append($"{meta.DisplayName} x{output.count}");
+
+                                bool isLastItemInLine = (i + 1) % 5 == 0;
+                                bool isLastItemOverall = i == outputs.Count - 1;
+                                if (!isLastItemOverall)
                                 {
-                                    sb.Append("\n"); 
-                                }
-                                else
-                                {
-                                    sb.Append(", "); 
+                                    if (isLastItemInLine)
+                                    {
+                                        sb.Append("\n");
+                                    }
+                                    else
+                                    {
+                                        sb.Append(", ");
+                                    }
                                 }
                             }
-                        }
-                        #endregion
+                            #endregion
 
-                        if (metaDataValid) 
-                        {
-                            currentOutputsText.text = sb.ToString();
-                            currentOutputsText.gameObject.SetActive(true);
-                            currentOutputsText.transform.SetParent(uiInstance.LayoutParent, false);
-                            currentOutputsText.transform.SetAsLastSibling();
-                            outputFound = true;
+                            if (metaDataValid)
+                            {
+                                currentOutputsText.text = sb.ToString();
+                                currentOutputsText.gameObject.SetActive(true);
+                                currentOutputsText.transform.SetParent(uiInstance.LayoutParent, false);
+                                currentOutputsText.transform.SetAsLastSibling();
+                                outputFound = true;
+                            }
                         }
                     }
-                }
-            } catch (Exception ex) { Debug.LogError(LogPrefix + $"Error getting Outputs: {ex.Message}"); outputFound = false; }
+                } catch (Exception ex) { Debug.LogError(LogPrefix + $"Error getting Outputs: {ex.Message}"); outputFound = false; }
+            }
 
 
             // --- 2. 获取可由此拆解 Sources ---
-            try 
+            if (config.showSources) // 检查配置
             {
-                BuildSourceLookupCacheIfNeeded();
-                if (_sourceLookupCache != null && _sourceLookupCache.TryGetValue(itemID, out List<int> sourceItemIDs))
+                try
                 {
-                    if (sourceItemIDs.Any())
+                    BuildSourceLookupCacheIfNeeded();
+                    if (_sourceLookupCache != null && _sourceLookupCache.TryGetValue(itemID, out List<int> sourceItemIDs))
                     {
-                        StringBuilder sb = new StringBuilder(ModLocalization.GetTranslation(ModLocalization.SourcesPrefixKey));
-                         #region Build Source String (不变)
-                        bool metaDataValid = true;
-                        
-                        int displayCount = Math.Min(sourceItemIDs.Count, 20);
-                        
-                        for (int i = 0; i < displayCount; i++)
+                        if (sourceItemIDs.Any())
                         {
-                            int sourceId = sourceItemIDs[i];
-                            ItemMetaData meta = ItemAssetsCollection.GetMetaData(sourceId);
-                             if (string.IsNullOrEmpty(meta.Name)) { metaDataValid = false; break; }
-                            sb.Append(meta.DisplayName);
-                            bool isLastItemInLine = (i + 1) % 10 == 0;
-                            bool isLastItemOverall = i == displayCount - 1;
-                            
-                            if (!isLastItemOverall)
+                            StringBuilder sb = new StringBuilder(ModLocalization.GetTranslation(ModLocalization.SourcesPrefixKey));
+                             #region Build Source String (不变)
+                            bool metaDataValid = true;
+
+                            int displayCount = Math.Min(sourceItemIDs.Count, 20);
+
+                            for (int i = 0; i < displayCount; i++)
                             {
-                                if (isLastItemInLine)
+                                int sourceId = sourceItemIDs[i];
+                                ItemMetaData meta = ItemAssetsCollection.GetMetaData(sourceId);
+                                if (string.IsNullOrEmpty(meta.Name)) { metaDataValid = false; break; }
+                                sb.Append(meta.DisplayName);
+                                bool isLastItemInLine = (i + 1) % 5 == 0;
+                                bool isLastItemOverall = i == displayCount - 1;
+
+                                if (!isLastItemOverall)
                                 {
-                                    sb.Append("\n");
-                                }
-                                else
-                                {
-                                    sb.Append(", ");
+                                    if (isLastItemInLine)
+                                    {
+                                        sb.Append("\n");
+                                    }
+                                    else
+                                    {
+                                        sb.Append(", ");
+                                    }
                                 }
                             }
-                        }
-                         #endregion
-                        
-                        if (metaDataValid)
-                        {
-                            
-                            if (sourceItemIDs.Count > 20)
+                             #endregion
+
+                            if (metaDataValid)
                             {
-                                sb.Append("..."); 
+
+                                if (sourceItemIDs.Count > 20)
+                                {
+                                    sb.Append("...");
+                                }
+
+                                currentSourcesText.text = sb.ToString();
+                                currentSourcesText.gameObject.SetActive(true);
+                                currentSourcesText.transform.SetParent(uiInstance.LayoutParent, false);
+                                currentSourcesText.transform.SetAsLastSibling();
+                                sourceFound = true;
                             }
-                            
-                            currentSourcesText.text = sb.ToString();
-                            currentSourcesText.gameObject.SetActive(true);
-                            currentSourcesText.transform.SetParent(uiInstance.LayoutParent, false);
-                            currentSourcesText.transform.SetAsLastSibling();
-                            sourceFound = true;
                         }
                     }
-                }
-            } catch (Exception ex) { Debug.LogError(LogPrefix + $"Error getting Sources: {ex.Message}"); sourceFound = false; }
-            
+                } catch (Exception ex) { Debug.LogError(LogPrefix + $"Error getting Sources: {ex.Message}"); sourceFound = false; }
+            }
+
             if (!outputFound)
             {
                 if (currentOutputsText != null && currentOutputsText.gameObject != null) currentOutputsText.gameObject.SetActive(false);
@@ -346,6 +380,82 @@ namespace ShowDisassemblyInfo
                  }
              }
              // Debug.Log(LogPrefix + $"Cache built: Processed {processedCount} formulas. Found sources for {_sourceLookupCache.Count} items. Total source entries added: {sourceEntriesAdded}.");
+        }
+
+        // ========== ModConfigAPI 集成方法 ==========
+
+        /// <summary>
+        /// 设置 ModConfig 配置项
+        /// </summary>
+        private void SetupModConfig()
+        {
+            if (!ModConfigAPI.IsAvailable())
+            {
+                Debug.LogWarning(LogPrefix + "ModConfigAPI not available!");
+                return;
+            }
+
+            try
+            {
+                // 订阅配置变更事件
+                ModConfigAPI.SafeAddOnOptionsChangedDelegate(OnModConfigOptionsChanged);
+
+                // 添加配置选项 - 显示"拆解出"
+                ModConfigAPI.SafeAddBoolDropdownList(
+                    MOD_NAME,
+                    "showOutputs",
+                    ModLocalization.GetTranslation(ModLocalization.ConfigShowOutputsKey),
+                    config.showOutputs
+                );
+
+                // 添加配置选项 - 显示"可由以下物品分解出"
+                ModConfigAPI.SafeAddBoolDropdownList(
+                    MOD_NAME,
+                    "showSources",
+                    ModLocalization.GetTranslation(ModLocalization.ConfigShowSourcesKey),
+                    config.showSources
+                );
+
+                Debug.Log(LogPrefix + "ModConfig setup completed successfully!");
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError(LogPrefix + $"Error setting up ModConfig: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// 从 ModConfig 加载配置
+        /// </summary>
+        private void LoadConfigFromModConfig()
+        {
+            if (!ModConfigAPI.IsAvailable())
+                return;
+
+            try
+            {
+                config.showOutputs = ModConfigAPI.SafeLoad<bool>(MOD_NAME, "showOutputs", config.showOutputs);
+                config.showSources = ModConfigAPI.SafeLoad<bool>(MOD_NAME, "showSources", config.showSources);
+
+                Debug.Log(LogPrefix + $"Config loaded - showOutputs: {config.showOutputs}, showSources: {config.showSources}");
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError(LogPrefix + $"Error loading config: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// 配置变更事件处理
+        /// </summary>
+        private void OnModConfigOptionsChanged(string key)
+        {
+            // 只处理本 Mod 的配置变更
+            if (!key.StartsWith(MOD_NAME + "_"))
+                return;
+
+            Debug.Log(LogPrefix + $"Config changed: {key}");
+            LoadConfigFromModConfig();
         }
     }
 }

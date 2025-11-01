@@ -622,6 +622,7 @@
     </ItemGroup>
     <ItemGroup>
         <Compile Include="ModBehaviour.cs" />
+        <Compile Include="ModConfigApi.cs" />
         <Compile Include="ModLocalization.cs" />
         <Compile Include="Properties\AssemblyInfo.cs"/>
     </ItemGroup>
